@@ -3,7 +3,7 @@ name: Build APK
 on:
   workflow_dispatch:
   push:
-    branches: [ master, main ]
+    branches: [ main ]
 
 permissions:
   contents: read
@@ -12,12 +12,33 @@ concurrency:
   group: apk-build-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  SOURCE_REPO: https://github.com/Trendyzima/tv49eastz.git
+  SOURCE_REF: master
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout build repository
         uses: actions/checkout@v4
+
+      - name: Fetch authoritative FadCam source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$SOURCE_REF" "$SOURCE_REPO" source
+          cd source
+          echo "SOURCE_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          test -f gradlew
+          test -f settings.gradle.kts
+          test -f app/build.gradle.kts
+
+      - name: Fetch patched Media3 dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/anonfaded/media3-patched.git /tmp/media3-patched
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -25,22 +46,58 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: gradle
+          cache-dependency-path: source/gradle/wrapper/gradle-wrapper.properties
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Make Gradle executable
-        run: chmod +x ./gradlew
+      - name: Verify source integrity
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Building FadCam source commit: $SOURCE_COMMIT"
+          find app/src/main -type f | wc -l
+          grep -n 'rootProject.name = "FadCam"' settings.gradle.kts
+          grep -n 'applicationId = "com.fadcam"' app/build.gradle.kts
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        working-directory: source
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Run unit tests
-        run: ./gradlew test --stacktrace
+        working-directory: source
+        run: ./gradlew test --stacktrace --no-daemon
 
-      - name: Upload APK
+      - name: Generate APK manifest
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          find app/build/outputs/apk -type f -name '*.apk' -print
+          find app/build/outputs/apk -type f -name '*.apk' -print0 | xargs -0 -r sha256sum > apk-sha256.txt
+          test -s apk-sha256.txt
+          cat apk-sha256.txt
+
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: tv49east-debug-apk-${{ github.sha }}
-          path: '**/build/outputs/apk/**/*.apk'
+          name: tv49east-fadcam-debug-${{ github.sha }}
+          path: |
+            source/app/build/outputs/apk/**/*.apk
+            source/apk-sha256.txt
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tv49east-build-reports-${{ github.sha }}
+          path: |
+            source/app/build/reports/**
+            source/app/build/test-results/**
+          if-no-files-found: ignore
+          retention-days: 7
